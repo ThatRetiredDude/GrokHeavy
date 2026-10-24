@@ -1,79 +1,79 @@
+"""GrokHeavy — interactive CLI for xAI's multi-agent Grok research workflow.
+
+Runs Grok's multi-agent ("Heavy") mode with optional server-side tools
+(web search, X search, code execution, collections search), streams the
+answer with a Rich UI, and saves each turn to a local session folder.
+"""
+
 import json
 import os
 from datetime import datetime
 from pathlib import Path
+
 from xai_sdk import Client
 from xai_sdk.chat import user
-from xai_sdk.tools import web_search, x_search, code_execution
+from xai_sdk.tools import web_search, x_search, code_execution, collections_search
 from rich.console import Console
 from rich.live import Live
 from rich.spinner import Spinner
-from rich.table import Table
 from rich.prompt import Prompt
 
 console = Console()
 
-# ====================== GROKHEAVY MONSTER v5 ======================
-# The ultimate multi-agent research beast you asked for
-# =================================================================
+# Current multi-agent ("Grok Heavy") model. xAI retired the dated beta id
+# (grok-4.20-multi-agent-beta-0309); the stable alias is below.
+MODEL = "grok-4.20-multi-agent"
 
-console.print("[bold green]🚀 GROKHEAVY MONSTER v5[/bold green] – 16-agent research weapon with full tools & UI")
-console.print("[dim]Persistent sessions • Slash commands • Templates • Exports • Document attach[/dim]\n")
+CONFIG_FILE = Path(os.environ.get("GROKHEAVY_CONFIG", "grokheavy_config.json"))
+LOG_DIR = Path(os.environ.get("GROKHEAVY_SESSIONS", "grokheavy_sessions"))
 
-CONFIG_FILE = Path("grokheavy_config.json")
 
-# Load or create config
-if CONFIG_FILE.exists():
-    with open(CONFIG_FILE) as f:
-        config = json.load(f)
-    api_key = config.get("api_key")
-    console.print(f"[green]Loaded API key from config[/green]")
-else:
+def load_api_key():
+    """Return an xAI API key from the environment, a saved config, or a prompt."""
+    env_key = os.environ.get("XAI_API_KEY")
+    if env_key:
+        console.print("[green]Loaded API key from XAI_API_KEY[/green]")
+        return env_key.strip()
+
+    if CONFIG_FILE.exists():
+        with open(CONFIG_FILE) as f:
+            api_key = json.load(f).get("api_key")
+        if api_key:
+            console.print(f"[green]Loaded API key from {CONFIG_FILE}[/green]")
+            return api_key
+
     api_key = Prompt.ask("Enter your xAI API key", password=True).strip()
     if Prompt.ask("Save API key for future runs? (y/n)", default="y").lower() == "y":
         with open(CONFIG_FILE, "w") as f:
             json.dump({"api_key": api_key}, f)
-        console.print("[green]API key saved securely[/green]")
+        console.print(f"[green]API key saved to {CONFIG_FILE}[/green]")
+    return api_key
 
-client = Client(api_key=api_key)
-model = "grok-4.20-multi-agent-beta-0309"
 
-# Tool selection
-console.print("\n[bold]Enable tools[/bold]")
-tools_enabled = []
-if Prompt.ask("Web Search?", default="y").lower() == "y":
-    tools_enabled.append(web_search())
-if Prompt.ask("X (Twitter) Search?", default="y").lower() == "y":
-    tools_enabled.append(x_search())
-if Prompt.ask("Code Execution?", default="y").lower() == "y":
-    tools_enabled.append(code_execution())
+def select_tools():
+    """Prompt for which server-side tools to enable and return the list."""
+    console.print("\n[bold]Enable tools[/bold]")
+    tools = []
+    if Prompt.ask("Web Search?", default="y").lower() == "y":
+        tools.append(web_search())
+    if Prompt.ask("X (Twitter) Search?", default="y").lower() == "y":
+        tools.append(x_search())
+    if Prompt.ask("Code Execution?", default="y").lower() == "y":
+        tools.append(code_execution())
 
-agent_count = 16 if Prompt.ask("Use 16 agents (deep research)?", default="y").lower() == "y" else 4
+    collection_ids = Prompt.ask(
+        "Collections to search? (comma-separated IDs, blank to skip)", default=""
+    ).strip()
+    if collection_ids:
+        ids = [c.strip() for c in collection_ids.split(",") if c.strip()][:10]
+        tools.append(collections_search(collection_ids=ids))
+        console.print(f"[green]Collections search enabled for {len(ids)} collection(s)[/green]")
 
-chat = client.chat.create(model=model, agent_count=agent_count, tools=tools_enabled, include=["verbose_streaming"])
+    return tools
 
-conv_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-session_name = "Untitled"
-log_dir = Path("grokheavy_sessions")
-log_dir.mkdir(exist_ok=True)
 
-def save_session():
-    # Already saved per turn, but this is extra full history if needed
-    pass
-
-def export_markdown(full_response, question):
-    md_file = log_dir / f"{session_name}_{conv_id}.md"
-    with open(md_file, "w", encoding="utf-8") as f:
-        f.write(f"# GrokHeavy Response\n\n**Question:** {question[:200]}...\n\n{full_response}")
-    console.print(f"[green]✅ Exported to {md_file}[/green]")
-
-templates = {
-    "genealogy": """[Paste your full Joe Kent 16-agent swarm prompt here – it's already loaded as default]"""
-}
-
-console.print(f"\n[bold cyan]Session started:[/bold cyan] {session_name} ({agent_count} agents)")
-
-while True:
+def read_prompt():
+    """Read a multi-line prompt, sent on two consecutive blank lines."""
     console.print("\n[bold]You[/bold] (paste then press Enter twice to send, or type /help):")
     lines = []
     blanks = 0
@@ -86,82 +86,129 @@ while True:
                 break
         else:
             blanks = 0
-    question = "\n".join(lines).strip()
+    return "\n".join(lines).strip()
 
-    if not question:
-        continue
-    if question.startswith("/"):
-        cmd = question.split()[0].lower()
-        if cmd == "/help":
-            console.print("[yellow]Commands: /new, /load <name>, /export, /attach <file>, /template genealogy, /tools, /quit[/yellow]")
-            continue
-        elif cmd == "/new":
-            chat = client.chat.create(model=model, agent_count=agent_count, tools=tools_enabled, include=["verbose_streaming"])
-            conv_id = datetime.now().strftime("%Y%m%d_%H%M%S")
-            session_name = Prompt.ask("New session name")
-            console.print("[green]New session started[/green]")
-            continue
-        elif cmd == "/export":
-            console.print("[green]Last response exported[/green]")
-            continue
-        elif cmd == "/quit":
-            break
-        # more commands can be added easily
 
-    # Attach file support
-    if question.startswith("/attach"):
-        file_path = question.split(maxsplit=1)[1].strip()
-        try:
-            with open(file_path, "r", encoding="utf-8") as f:
-                attached = f.read()
-            question = attached + "\n\n" + question
-            console.print(f"[green]Attached {file_path}[/green]")
-        except:
-            console.print("[red]File not found[/red]")
+def export_markdown(session_name, conv_id, question, response):
+    LOG_DIR.mkdir(exist_ok=True)
+    md_file = LOG_DIR / f"{session_name}_{conv_id}.md"
+    with open(md_file, "w", encoding="utf-8") as f:
+        f.write(f"# GrokHeavy — {session_name}\n\n**Question:** {question}\n\n{response}")
+    console.print(f"[green]Exported to {md_file}[/green]")
 
-    chat.append(user(question))
 
-    console.print("\n[bold magenta]GrokHeavy Swarm Thinking...[/bold magenta]")
-    with Live(Spinner("dots", text="16 agents collaborating + tools active"), console=console, refresh_per_second=4) as live:
-        full_response = ""
-        streaming_chunks = []
+def stream_answer(chat):
+    """Stream one response, showing reasoning progress, and return the text."""
+    console.print("\n[bold magenta]GrokHeavy swarm thinking...[/bold magenta]")
+    full_response = ""
+    with Live(Spinner("dots", text="Agents collaborating + tools active"),
+              console=console, refresh_per_second=4) as live:
         is_thinking = True
-
         for response, chunk in chat.stream():
-            if hasattr(response, "usage") and getattr(response.usage, "reasoning_tokens", 0) and is_thinking:
-                live.update(Spinner("dots", text=f"Reasoning tokens: {response.usage.reasoning_tokens}"))
+            reasoning = getattr(getattr(response, "usage", None), "reasoning_tokens", 0)
+            if reasoning and is_thinking:
+                live.update(Spinner("dots", text=f"Reasoning tokens: {reasoning}"))
             if chunk.content:
                 if is_thinking:
                     live.stop()
-                    console.print("\n[bold green]✅ Final Answer[/bold green]\n")
+                    console.print("\n[bold green]Final answer[/bold green]\n")
                     is_thinking = False
                 console.print(chunk.content, end="", style="white")
                 full_response += chunk.content
-                streaming_chunks.append(chunk.content)
-
     console.print("\n")
+    return full_response
 
-    # Save everything (JSON + MD)
-    log_entry = {
-        "session": session_name,
-        "timestamp": datetime.now().isoformat(),
-        "agents": agent_count,
-        "question": question,
-        "response": full_response,
-        "tools_used": [t.__class__.__name__ for t in tools_enabled],
-    }
-    filename = log_dir / f"{session_name}_{conv_id}_{datetime.now().strftime('%H%M%S')}.json"
-    with open(filename, "w", encoding="utf-8") as f:
-        json.dump(log_entry, f, indent=2)
 
-    export_markdown(full_response, question)
+def main():
+    console.print("[bold green]GrokHeavy[/bold green] — multi-agent Grok research CLI")
+    console.print("[dim]Streaming output • server-side tools • local session exports[/dim]\n")
 
-    console.print(f"[dim]💾 Saved to {filename}[/dim]")
+    client = Client(api_key=load_api_key())
+    tools = select_tools()
+    agent_count = 16 if Prompt.ask("Use 16 agents (deep research)?", default="y").lower() == "y" else 4
 
-    choice = Prompt.ask("Next? (A) New session  (B) Continue  (C) Load previous", choices=["A","B","C"], default="B")
-    if choice == "A":
-        # reset logic
-        pass
-    elif choice == "C":
-        # list and load previous sessions
-        pass
+    def new_chat():
+        return client.chat.create(
+            model=MODEL, agent_count=agent_count, tools=tools, include=["verbose_streaming"]
+        )
+
+    chat = new_chat()
+    conv_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+    session_name = "Untitled"
+    last_question = last_response = None
+
+    console.print(f"\n[bold cyan]Session started:[/bold cyan] {session_name} ({agent_count} agents)")
+
+    while True:
+        question = read_prompt()
+        if not question:
+            continue
+
+        if question.startswith("/"):
+            parts = question.split(maxsplit=1)
+            cmd = parts[0].lower()
+            if cmd == "/help":
+                console.print("[yellow]Commands: /new, /export, /attach <file>, /tools, /quit[/yellow]")
+                continue
+            if cmd == "/new":
+                chat = new_chat()
+                conv_id = datetime.now().strftime("%Y%m%d_%H%M%S")
+                session_name = Prompt.ask("New session name", default="Untitled")
+                last_question = last_response = None
+                console.print("[green]New session started[/green]")
+                continue
+            if cmd == "/tools":
+                console.print(f"[yellow]Enabled: {', '.join(t.__class__.__name__ for t in tools) or 'none'}[/yellow]")
+                continue
+            if cmd == "/export":
+                if last_response:
+                    export_markdown(session_name, conv_id, last_question, last_response)
+                else:
+                    console.print("[red]Nothing to export yet[/red]")
+                continue
+            if cmd == "/quit":
+                break
+            if cmd == "/attach":
+                if len(parts) < 2:
+                    console.print("[red]Usage: /attach <file>[/red]")
+                    continue
+                try:
+                    with open(parts[1].strip(), "r", encoding="utf-8") as f:
+                        attached = f.read()
+                except OSError:
+                    console.print("[red]File not found[/red]")
+                    continue
+                console.print(f"[green]Attached {parts[1].strip()}. Now type your prompt.[/green]")
+                follow_up = read_prompt()
+                if not follow_up:
+                    continue
+                question = f"{attached}\n\n{follow_up}"
+            else:
+                console.print(f"[red]Unknown command: {cmd}[/red]")
+                continue
+
+        chat.append(user(question))
+        response = stream_answer(chat)
+
+        last_question, last_response = question, response
+        LOG_DIR.mkdir(exist_ok=True)
+        log_entry = {
+            "session": session_name,
+            "timestamp": datetime.now().isoformat(),
+            "agents": agent_count,
+            "question": question,
+            "response": response,
+            "tools_used": [t.__class__.__name__ for t in tools],
+        }
+        filename = LOG_DIR / f"{session_name}_{conv_id}_{datetime.now().strftime('%H%M%S')}.json"
+        with open(filename, "w", encoding="utf-8") as f:
+            json.dump(log_entry, f, indent=2)
+        export_markdown(session_name, conv_id, question, response)
+        console.print(f"[dim]Saved to {filename}[/dim]")
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (KeyboardInterrupt, EOFError):
+        console.print("\n[dim]Bye.[/dim]")
